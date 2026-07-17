@@ -475,35 +475,33 @@ async def update_profile(
         email = update_data.get("email")
         if isinstance(email, str):
             cleaned_email = email.strip().lower()
+            current_email = (current_user.get("email") or "").strip().lower()
             if cleaned_email:
-                current_email = current_user.get("email")
-                if current_email != cleaned_email:
+                if current_email and current_email != cleaned_email:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "EMAIL_ALREADY_SET",
+                            "message": "Email is already set and cannot be changed.",
+                        },
+                    )
+
+                if not current_email:
                     existing_email = await db.users.find_one({"email": cleaned_email, "firebase_uid": {"$ne": uid}}, {"_id": 1})
                     if existing_email:
                         raise HTTPException(status_code=400, detail="Email already in use")
 
-                    email_change_verified = current_user.get("email_change_verified") or {}
-                    verified_email = email_change_verified.get("email")
-                    verified_at = email_change_verified.get("verified_at")
-
-                    if verified_email != cleaned_email:
-                        raise HTTPException(
-                            status_code=400,
-                            detail={
-                                "code": "EMAIL_CHANGE_OTP_REQUIRED",
-                                "message": "Please verify your new email address before saving.",
-                            },
-                        )
-
-                    if not isinstance(verified_at, datetime) or datetime.utcnow() - verified_at > timedelta(minutes=EMAIL_CHANGE_VERIFICATION_WINDOW_MINUTES):
-                        raise HTTPException(
-                            status_code=400,
-                            detail={
-                                "code": "EMAIL_CHANGE_OTP_EXPIRED",
-                                "message": "New email verification expired. Please verify the email again.",
-                            },
-                        )
-            update_data["email"] = cleaned_email
+                update_data["email"] = cleaned_email
+            else:
+                if current_email:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "EMAIL_CANNOT_BE_CLEARED",
+                            "message": "Email is already set and cannot be cleared.",
+                        },
+                    )
+                update_data.pop("email", None)
 
         # Explicitly allow other profile fields to update without extra OTP verification
         for field in ["bio", "location", "website", "website_name", "gender", "image_name", "cover_image", "account_type", "instagram", "youtube", "facebook", "x", "linkedin", "whatsapp"]:
