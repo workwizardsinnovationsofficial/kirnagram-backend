@@ -1,8 +1,10 @@
+import asyncio
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from app.routes.auth_new import router as auth_router
+from app.routes.auth_new import router as auth_router, send_due_password_setup_notifications
 from app.routes.profile import router as profile_router
 from app.routes.upload import router as upload_router
 from app.routes.notification import router as notification_router
@@ -29,6 +31,16 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 app = FastAPI(title="kirnagram Backend")
+
+
+async def password_setup_notification_loop():
+    while True:
+        try:
+            await send_due_password_setup_notifications()
+        except Exception:
+            pass
+
+        await asyncio.sleep(12 * 60 * 60)
 
 # ✅ SECURITY HEADERS MIDDLEWARE
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -189,6 +201,18 @@ async def ensure_indexes():
     ])
     # Auto-clean expired OTP documents.
     await db.otp_verifications.create_index("expires_at", expireAfterSeconds=0)
+    # Auto-delete stories once their 24-hour window has elapsed.
+    await db.stories.create_index("expires_at", expireAfterSeconds=0)
+
+    if not getattr(app.state, "password_setup_notification_task", None):
+        app.state.password_setup_notification_task = asyncio.create_task(password_setup_notification_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown_background_tasks():
+    task = getattr(app.state, "password_setup_notification_task", None)
+    if task:
+        task.cancel()
 
 
 

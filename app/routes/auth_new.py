@@ -23,6 +23,7 @@ class SignupRequest(BaseModel):
     email: Optional[str] = None
     mobile: Optional[str] = None
     password: str
+    google_profile: Optional[dict] = None
 
 
 class LoginRequest(BaseModel):
@@ -69,6 +70,15 @@ class GoogleAuthRequest(BaseModel):
     id_token: str
     full_name: Optional[str] = None
     email: Optional[str] = None
+    image_name: Optional[str] = None
+    dob: Optional[str] = None
+    gender: Optional[str] = None
+    mobile: Optional[str] = None
+
+
+class PasswordSetupRequest(BaseModel):
+    new_password: str
+    confirm_password: str
 
 
 class UpdateProfileRequest(BaseModel):
@@ -109,6 +119,8 @@ def _normalize_mobile(value: Optional[str]) -> str:
 # ============== ROUTER ==============
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+PASSWORD_SETUP_REMINDER_HOURS = 12
 
 
 # --------------------------------------------------
@@ -312,6 +324,7 @@ async def signup(request: SignupRequest):
     try:
         public_id = await next_public_user_id()
 
+        google_profile = request.google_profile or {}
         user_doc = {
             "public_id": public_id,
             "firebase_uid": None,
@@ -319,12 +332,15 @@ async def signup(request: SignupRequest):
             "email": email,
             "mobile": mobile,
             "password_hash": hash_password(request.password),
-            "auth_type": "manual",
+            "auth_type": "google" if google_profile else "manual",
             "account_type": "public",
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
             "is_active": True,
-            "two_factor_enabled": False
+            "two_factor_enabled": False,
+            "image_name": google_profile.get("picture") or google_profile.get("image_name"),
+            "dob": google_profile.get("dob"),
+            "gender": google_profile.get("gender"),
         }
 
         result = await db.users.insert_one(user_doc)
@@ -831,19 +847,20 @@ async def send_login_mobile_otp(request: SendOTPRequest):
 
 async def _verify_google_id_token(id_token: str):
     try:
-        response = await httpx.get(
-            "https://oauth2.googleapis.com/tokeninfo",
-            params={"id_token": id_token},
-            timeout=10.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://oauth2.googleapis.com/tokeninfo",
+                params={"id_token": id_token},
+                timeout=10.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
 
-        email_verified = payload.get("email_verified")
-        if email_verified not in {"true", True, "1", 1}:
-            raise HTTPException(status_code=401, detail="Google email not verified")
+            email_verified = payload.get("email_verified")
+            if email_verified not in {"true", True, "1", 1}:
+                raise HTTPException(status_code=401, detail="Google email not verified")
 
-        return payload
+            return payload
 
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
@@ -1062,6 +1079,10 @@ async def change_password(
 async def google_login(request: GoogleAuthRequest):
     """
     Login with Google OAuth
+    
+    For Google OAuth, we trust that Google has verified the email.
+    We reuse an existing saved mobile number when available and only require
+    verification for accounts that do not yet have a mobile attached.
     """
 
     if not request.id_token:
@@ -1070,10 +1091,52 @@ async def google_login(request: GoogleAuthRequest):
     try:
         google_payload = await _verify_google_id_token(request.id_token)
 
-        email = _normalize_email(google_payload.get("email"))
+        email = _normalize_email(google_payload.get("email") or request.email)
         full_name = google_payload.get("name") or request.full_name
+        image_name = request.image_name or google_payload.get("picture")
+        dob = request.dob or google_payload.get("birthdate")
+        gender = request.gender or google_payload.get("gender")
+        mobile = _normalize_mobile(request.mobile) if request.mobile else None
+
+        # For Google OAuth, we trust Google's email verification
+        # We don't need to check email_verifications collection
+        if not email:
+            raise HTTPException(status_code=400, detail="Email from Google is required")
 
         user = await db.users.find_one({"email": email})
+
+        if user and user.get("mobile"):
+            mobile = _normalize_mobile(user.get("mobile"))
+
+        # Existing Google users keep their saved mobile number. We only ask for
+        # verification when no mobile is already attached to the account.
+        if not mobile:
+            return {
+                "success": False,
+                "needs_mobile_verification": True,
+                "email": email,
+                "full_name": full_name,
+                "image_name": image_name,
+                "dob": dob,
+                "gender": gender,
+                "message": "Mobile verification required"
+            }
+
+        # New users still need the submitted mobile to be verified before we
+        # create the account.
+        if not user:
+            mobile_verification = await db.mobile_verifications.find_one({"_id": mobile})
+            if not mobile_verification or not mobile_verification.get("verified"):
+                return {
+                    "success": False,
+                    "needs_mobile_verification": True,
+                    "email": email,
+                    "full_name": full_name,
+                    "image_name": image_name,
+                    "dob": dob,
+                    "gender": gender,
+                    "message": "Mobile verification required"
+                }
 
         if not user:
             public_id = await next_public_user_id()
@@ -1083,11 +1146,17 @@ async def google_login(request: GoogleAuthRequest):
                 "firebase_uid": None,
                 "full_name": full_name,
                 "email": email,
-                "mobile": None,
+                "mobile": mobile,
                 "auth_type": "google",
+                "password_hash": None,
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow(),
                 "is_active": True,
+                "image_name": image_name,
+                "dob": dob,
+                "gender": gender,
+                "needs_password_setup": True,
+                "password_setup_notification_sent_at": None,
             }
 
             result = await db.users.insert_one(user_doc)
@@ -1120,7 +1189,15 @@ async def google_login(request: GoogleAuthRequest):
 
         await db.users.update_one(
             {"_id": user["_id"]},
-            {"$set": {"last_login": datetime.utcnow()}}
+            {
+                "$set": {
+                    "last_login": datetime.utcnow(),
+                    "image_name": user.get("image_name") or image_name,
+                    "dob": user.get("dob") or dob,
+                    "gender": user.get("gender") or gender,
+                    "mobile": user.get("mobile") or mobile,
+                }
+            }
         )
 
         tokens = create_session_tokens(
@@ -1136,6 +1213,7 @@ async def google_login(request: GoogleAuthRequest):
             "public_id": user.get("public_id"),
             "full_name": user.get("full_name"),
             "is_new_user": is_new_user,
+            "needs_password_setup": user.get("needs_password_setup", False),
             **tokens,
         }
 
@@ -1147,6 +1225,159 @@ async def google_login(request: GoogleAuthRequest):
             status_code=401,
             detail=f"Google login failed: {str(e)}"
         )
+
+
+# --------------------------------------------------
+# PASSWORD SETUP ENDPOINTS
+# --------------------------------------------------
+
+
+async def _send_password_setup_notification_if_due(user: dict) -> bool:
+    email = user.get("email")
+    if not email:
+        return False
+
+    last_sent = user.get("password_setup_notification_sent_at")
+    if last_sent:
+        last_sent_dt = last_sent if isinstance(last_sent, datetime) else datetime.fromisoformat(str(last_sent))
+        hours_since = (datetime.utcnow() - last_sent_dt).total_seconds() / 3600
+        if hours_since < PASSWORD_SETUP_REMINDER_HOURS:
+            return False
+
+    now = datetime.utcnow()
+    await db.users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"password_setup_notification_sent_at": now}},
+    )
+
+    email_result = await EmailService.send_password_setup_notification(
+        email,
+        user.get("full_name", "User"),
+    )
+    return bool(email_result.get("success"))
+
+
+async def send_due_password_setup_notifications() -> int:
+    sent_count = 0
+    cursor = db.users.find(
+        {
+            "needs_password_setup": True,
+            "email": {"$nin": [None, ""]},
+        }
+    )
+
+    async for user in cursor:
+        try:
+            if await _send_password_setup_notification_if_due(user):
+                sent_count += 1
+        except Exception:
+            continue
+
+    return sent_count
+
+@router.post("/check-password-setup")
+async def check_password_setup(authorization: str = Header(...)):
+    """Check if user needs to set up password"""
+    
+    try:
+        token = extract_token_from_header(authorization)
+        payload = verify_access_token(token)
+        user_id = payload.get("sub")
+        
+        user = await db.users.find_one({"_id": ObjectId(user_id)})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "success": True,
+            "needs_password_setup": user.get("needs_password_setup", False),
+            "has_password": bool(user.get("password_hash")),
+            "auth_type": user.get("auth_type"),
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Failed to check password setup: {str(e)}")
+
+
+@router.post("/send-password-setup-notification")
+async def send_password_setup_notification(authorization: str = Header(...)):
+    """Send password setup notification to user"""
+    
+    try:
+        token = extract_token_from_header(authorization)
+        payload = verify_access_token(token)
+        user_id = payload.get("sub")
+        
+        user = await db.users.find_one({"_id": ObjectId(user_id)})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        sent = await _send_password_setup_notification_if_due(user)
+        if not sent:
+            raise HTTPException(
+                status_code=400,
+                detail="Notification already sent in the last 12 hours",
+            )
+        
+        return {
+            "success": True,
+            "message": "Password setup notification sent",
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send notification: {str(e)}")
+
+
+@router.post("/setup-password")
+async def setup_password(request: PasswordSetupRequest, authorization: str = Header(...)):
+    """Set up password for user who signed up via Google"""
+    
+    try:
+        token = extract_token_from_header(authorization)
+        payload = verify_access_token(token)
+        user_id = payload.get("sub")
+        
+        if request.new_password != request.confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+        
+        if not validate_password(request.new_password):
+            raise HTTPException(
+                status_code=400,
+                detail="Password must be at least 8 characters with uppercase, lowercase, and a number"
+            )
+        
+        user = await db.users.find_one({"_id": ObjectId(user_id)})
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Set password and mark setup as complete
+        await db.users.update_one(
+            {"_id": user["_id"]},
+            {
+                "$set": {
+                    "password_hash": hash_password(request.new_password),
+                    "needs_password_setup": False,
+                    "updated_at": datetime.utcnow(),
+                }
+            }
+        )
+        
+        return {
+            "success": True,
+            "message": "Password set up successfully",
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to set up password: {str(e)}")
 
 
 # --------------------------------------------------

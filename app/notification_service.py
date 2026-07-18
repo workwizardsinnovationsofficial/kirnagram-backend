@@ -258,6 +258,47 @@ class EmailService:
         return await EmailService._send_email(email, subject, html_content)
     
     @staticmethod
+    async def send_password_setup_notification(email: str, full_name: str) -> Dict:
+        """Send password setup notification email"""
+        
+        subject = "Set Up a Password for Your Kirnagram Account"
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; background-color: #f5f5f5; padding: 20px;">
+                <div style="max-width: 600px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h2 style="color: #333; text-align: center;">Secure Your Account, {full_name}!</h2>
+                    
+                    <p style="color: #666; font-size: 16px; margin: 20px 0;">
+                        We noticed you haven't set up a password for your Kirnagram account yet.
+                    </p>
+                    
+                    <p style="color: #666; font-size: 16px; margin: 20px 0;">
+                        For better security, we recommend setting up a strong password for your account.
+                    </p>
+                    
+                    <div style="text-align: center; margin: 30px 0;">
+                        <a href="https://kirnagram.com/auth/setup-password" style="display: inline-block; background-color: #FF6B6B; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                            Set Up Password Now
+                        </a>
+                    </div>
+                    
+                    <p style="color: #999; font-size: 12px; text-align: center;">
+                        This link will expire in 24 hours. You can set up a password anytime from your account settings.
+                    </p>
+                    
+                    <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+                    
+                    <p style="color: #999; font-size: 12px; text-align: center;">
+                        If you need any help, please contact our support team.
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+        
+        return await EmailService._send_email(email, subject, html_content)
+    
+    @staticmethod
     async def _send_email(to_email: str, subject: str, html_content: str) -> Dict:
         """Internal method to send email"""
         

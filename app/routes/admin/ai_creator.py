@@ -1101,9 +1101,11 @@ async def get_application(user_id: str):
 async def update_creator_profile(payload: CreatorProfileUpdate, authorization: str = Header(...)):
     user_id = get_user_id_from_header(authorization)
 
+    user_doc = await db.users.find_one({"firebase_uid": user_id})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="User not found")
+
     creator_app = await db.ai_creator_applications.find_one({"user_id": user_id})
-    if not creator_app:
-        raise HTTPException(status_code=404, detail="AI Creator application not found")
 
     update_fields = {}
     for key, value in payload.dict(exclude_unset=True).items():
@@ -1115,6 +1117,53 @@ async def update_creator_profile(payload: CreatorProfileUpdate, authorization: s
 
     if "dob" in update_fields:
         update_fields["dob"] = _normalize_dob_string(update_fields.get("dob"))
+
+    if not creator_app:
+        # If no AI Creator application exists, create one from the user's profile and the creator-specific fields.
+        application_data = {
+            "user_id": user_id,
+            "full_name": user_doc.get("full_name", "") or "",
+            "email": user_doc.get("email", "") or "",
+            "mobile": user_doc.get("mobile", "") or "",
+            "dob": user_doc.get("dob", "") or "",
+            "status": "pending",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        application_data.update(update_fields)
+
+        if not application_data["full_name"] or not application_data["email"] or not application_data["mobile"] or not application_data["dob"]:
+            raise HTTPException(
+                status_code=400,
+                detail="Complete your personal profile (name, email, mobile, dob) before starting AI Creator application."
+            )
+
+        await db.ai_creator_applications.insert_one(application_data)
+
+        user_updates = {k: v for k, v in update_fields.items() if k in {
+            "full_name",
+            "dob",
+            "website",
+            "website_name",
+            "instagram",
+            "youtube",
+            "facebook",
+            "x",
+            "linkedin",
+            "whatsapp",
+        }}
+        if user_updates:
+            await db.users.update_one(
+                {"firebase_uid": user_id},
+                {"$set": user_updates},
+            )
+
+        return {
+            "success": True,
+            "message": "AI Creator application created and profile updated",
+            "created": True,
+            "updated_fields": list(update_fields.keys()),
+        }
 
     if not update_fields:
         return {"success": True, "message": "No changes", "updated_fields": []}
