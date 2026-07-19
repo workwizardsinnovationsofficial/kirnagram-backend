@@ -848,7 +848,7 @@ async def _verify_google_id_token(id_token: str):
             response = await client.get(
                 "https://oauth2.googleapis.com/tokeninfo",
                 params={"id_token": id_token},
-                timeout=10.0,
+                timeout=10.0
             )
 
         response.raise_for_status()
