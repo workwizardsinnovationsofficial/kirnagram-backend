@@ -844,9 +844,6 @@ async def send_login_mobile_otp(request: SendOTPRequest):
 
 async def _verify_google_id_token(id_token: str):
     try:
-        print("httpx module:", httpx)
-        print("AsyncClient:", httpx.AsyncClient)
-
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 "https://oauth2.googleapis.com/tokeninfo",
@@ -854,18 +851,26 @@ async def _verify_google_id_token(id_token: str):
                 timeout=10.0,
             )
 
-            print("Response type:", type(response))
+        response.raise_for_status()
+        payload = response.json()
 
-            response.raise_for_status()
-            return response.json()
+        email_verified = payload.get("email_verified")
+        if email_verified not in {"true", True, "1", 1}:
+            raise HTTPException(status_code=401, detail="Google email not verified")
 
-    except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        return payload
+
+    except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=401,
-            detail=f"Failed to verify Google token: {exc}"
-        )
+            detail=f"Invalid Google ID token: {exc.response.text}"
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Failed to verify Google token: {str(exc)}"
+        ) from exc
 
 @router.post("/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest):
