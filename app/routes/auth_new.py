@@ -853,7 +853,16 @@ async def _verify_google_id_token(id_token: str):
                 params={"id_token": id_token},
                 timeout=10.0,
             )
-            response.raise_for_status()
+            
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as http_err:
+                error_text = response.text
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Invalid Google ID token: {error_text}"
+                ) from http_err
+            
             payload = response.json()
 
             email_verified = payload.get("email_verified")
@@ -862,11 +871,8 @@ async def _verify_google_id_token(id_token: str):
 
             return payload
 
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Invalid Google ID token: {exc.response.text}"
-        ) from exc
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
