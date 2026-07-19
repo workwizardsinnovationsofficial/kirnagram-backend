@@ -1202,11 +1202,10 @@ async def google_login(request: GoogleAuthRequest):
     except HTTPException:
         raise
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Google login failed: {str(e)}"
-        )
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        raise
 
 
 # --------------------------------------------------
