@@ -1,6 +1,8 @@
+import asyncio
 from fastapi import APIRouter, UploadFile, File, Header, HTTPException
 from app.r2 import s3, BUCKET_NAME, PUBLIC_BASE
-from app.jwt_auth import verify_access_token, extract_token_from_header, get_user_id_from_authorization_header
+from app.jwt_auth import extract_token_from_header
+from app.jwt_auth import verify_access_token
 from app.firebase import verify_firebase_token
 from app.database import db
 from bson import ObjectId
@@ -12,6 +14,44 @@ from io import BytesIO
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/upload", tags=["Upload"])
+
+
+def get_token_from_header(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    return extract_token_from_header(authorization)
+
+
+def get_user_uid(authorization: str | None) -> str:
+    token = get_token_from_header(authorization)
+
+    # Primary path: JWT access token used by current auth flow.
+    try:
+        payload = verify_access_token(token)
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+        return user_id
+    except HTTPException as jwt_error:
+        # Fallback path: Firebase token for legacy clients.
+        if jwt_error.status_code != 401:
+            raise
+
+    decoded = verify_firebase_token(token)
+    uid = decoded.get("uid")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    return uid
+
+
+async def upload_fileobj_to_r2(file_content: bytes, filename: str, content_type: str) -> None:
+    await asyncio.to_thread(
+        s3.upload_fileobj,
+        BytesIO(file_content),
+        BUCKET_NAME,
+        filename,
+        ExtraArgs={"ContentType": content_type}
+    )
 
 
 # 🧪 TEST ENDPOINT - Check R2 Configuration
@@ -31,20 +71,18 @@ async def test_r2_config():
 async def debug_check_database(authorization: str = Header(...)):
     """🔍 DEBUG: Check what's actually in the database for the current user"""
     try:
-        if not authorization or " " not in authorization:
-            raise HTTPException(status_code=401, detail="Invalid authorization header")
-        
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
-        
-        user = await db.users.find_one({"firebase_uid": uid}, {"_id": 0})
+        uid = get_user_uid(authorization)
+        query = {"$or": [{"firebase_uid": uid}]}
+        if ObjectId.is_valid(uid):
+            query["$or"].append({"_id": ObjectId(uid)})
+
+        user = await db.users.find_one(query, {"_id": 0})
         
         if not user:
             return {
                 "status": "error",
-                "message": f"User not found in database for firebase_uid={uid}",
-                "firebase_uid": uid
+                "message": f"User not found in database for uid={uid}",
+                "uid": uid
             }
         
         return {
@@ -69,21 +107,32 @@ async def debug_check_database(authorization: str = Header(...)):
         }
 
 
+@router.options("/profile-image")
+async def options_profile_image():
+    return {"ok": True}
+
 @router.post("/profile-image")
 async def upload_profile_image(
     file: UploadFile = File(...),
-    authorization: str = Header(...)
+    authorization: str | None = Header(None)
 ):
     try:
         logger.info(f"🔹 Uploading profile image: {file.filename}")
-        
-        # 1️⃣ GET FIREBASE TOKEN
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
+        uid = get_user_uid(authorization)
+        user_query = {"$or": [{"firebase_uid": uid}]}
+        if ObjectId.is_valid(uid):
+            user_query["$or"].append({"_id": ObjectId(uid)})
 
-        # 2️⃣ USER ID FROM FIREBASE
-        uid = decoded["uid"]
-        logger.info(f"✅ User authenticated: {uid}")
+        user_exists = await db.users.find_one(user_query)
+        if not user_exists:
+            logger.error(f"❌ User document not found for identifier={uid}")
+            raise HTTPException(
+                status_code=400,
+                detail="User document not found. Please ensure user is registered first."
+            )
+
+        storage_uid = user_exists.get("firebase_uid") or uid
+        logger.info(f"✅ User authenticated: {storage_uid}")
 
         # 3️⃣ FILE EXTENSION (jpg / png / webp)
         if not file.filename or "." not in file.filename:
@@ -93,7 +142,7 @@ async def upload_profile_image(
         logger.info(f"📄 File extension: {ext}")
 
         # 4️⃣ UNIQUE FILE PATH IN R2
-        filename = f"profile/{uid}.{ext}"
+        filename = f"profile/{storage_uid}.{ext}"
         logger.info(f"📁 R2 path: {filename}")
         logger.info(f"🪣 Bucket: {BUCKET_NAME}")
         logger.info(f"🌐 Public base: {PUBLIC_BASE}")
@@ -102,15 +151,11 @@ async def upload_profile_image(
         file_content = await file.read()
         logger.info(f"📤 File size: {len(file_content)} bytes")
         
-        # Upload with timeout and better error handling
         try:
-            s3.upload_fileobj(
-                BytesIO(file_content),
-                BUCKET_NAME,
+            await upload_fileobj_to_r2(
+                file_content,
                 filename,
-                ExtraArgs={
-                    "ContentType": file.content_type or "image/png"
-                }
+                file.content_type or "image/png"
             )
             logger.info(f"✅ File uploaded to R2 successfully")
         except Exception as upload_error:
@@ -128,19 +173,11 @@ async def upload_profile_image(
         logger.info(f"   Bucket: {BUCKET_NAME}")
         logger.info(f"   Filename: {filename}")
 
-        # 7️⃣ VERIFY USER EXISTS IN DATABASE BEFORE SAVING
-        user_exists = await db.users.find_one({"firebase_uid": uid})
-        if not user_exists:
-            logger.error(f"❌ User document not found for firebase_uid={uid}")
-            raise HTTPException(
-                status_code=400, 
-                detail=f"User document not found. Please ensure user is registered first."
-            )
-        logger.info(f"✅ User document found for firebase_uid={uid}")
+        logger.info(f"✅ User document found for identifier={uid}")
 
         # SAVE IMAGE URL IN MONGODB
         result = await db.users.update_one(
-            {"firebase_uid": uid},
+            user_query,
             {"$set": {"image_name": public_url}}
         )
         logger.info(f"✅ Database updated - Modified count: {result.modified_count}")
@@ -149,7 +186,7 @@ async def upload_profile_image(
         logger.info(f"   Saved URL to MongoDB: {public_url}")
         
         # 7️⃣ VERIFY SAVE WAS SUCCESSFUL
-        updated_user = await db.users.find_one({"firebase_uid": uid})
+        updated_user = await db.users.find_one(user_query)
         if updated_user and updated_user.get("image_name") == public_url:
             logger.info(f"✅ Verification successful: image_name is saved correctly in database")
         else:
@@ -164,27 +201,41 @@ async def upload_profile_image(
         # 8️⃣ RETURN IMAGE URL TO FRONTEND
         return {"image_url": public_url}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Error uploading profile image: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 
 
+@router.options("/cover-image")
+async def options_cover_image():
+    return {"ok": True}
+
 @router.post("/cover-image")
 async def upload_cover_image(
     file: UploadFile = File(...),
-    authorization: str = Header(...)
+    authorization: str | None = Header(None)
 ):
     try:
         logger.info(f"🔹 Uploading cover image: {file.filename}")
         
-        # 1️⃣ GET FIREBASE TOKEN
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
+        uid = get_user_uid(authorization)
+        user_query = {"$or": [{"firebase_uid": uid}]}
+        if ObjectId.is_valid(uid):
+            user_query["$or"].append({"_id": ObjectId(uid)})
 
-        # 2️⃣ USER ID FROM FIREBASE
-        uid = decoded["uid"]
-        logger.info(f"✅ User authenticated: {uid}")
+        user_exists = await db.users.find_one(user_query)
+        if not user_exists:
+            logger.error(f"❌ User document not found for identifier={uid}")
+            raise HTTPException(
+                status_code=400,
+                detail="User document not found. Please ensure user is registered first."
+            )
+
+        storage_uid = user_exists.get("firebase_uid") or uid
+        logger.info(f"✅ User authenticated: {storage_uid}")
 
         # 3️⃣ FILE EXTENSION (jpg / png / webp)
         if not file.filename or "." not in file.filename:
@@ -194,22 +245,26 @@ async def upload_cover_image(
         logger.info(f"📄 File extension: {ext}")
 
         # 4️⃣ UNIQUE FILE PATH IN R2
-        filename = f"cover/{uid}.{ext}"
+        filename = f"cover/{storage_uid}.{ext}"
         logger.info(f"📁 R2 path: {filename}")
 
         # 5️⃣ UPLOAD FILE TO CLOUDFLARE R2
         file_content = await file.read()
         logger.info(f"📤 File size: {len(file_content)} bytes")
         
-        s3.upload_fileobj(
-            BytesIO(file_content),
-            BUCKET_NAME,
-            filename,
-            ExtraArgs={
-                "ContentType": file.content_type
-            }
-        )
-        logger.info(f"✅ File uploaded to R2")
+        try:
+            await upload_fileobj_to_r2(
+                file_content,
+                filename,
+                file.content_type or "image/png"
+            )
+            logger.info(f"✅ File uploaded to R2")
+        except Exception as upload_error:
+            logger.error(f"❌ R2 Upload failed: {str(upload_error)}", exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload to R2: {str(upload_error)}"
+            )
 
         # 6️⃣ PUBLIC IMAGE URL
         base_url = PUBLIC_BASE.rstrip("/")
@@ -219,19 +274,11 @@ async def upload_cover_image(
         logger.info(f"   Bucket: {BUCKET_NAME}")
         logger.info(f"   Filename: {filename}")
 
-        # 7️⃣ VERIFY USER EXISTS IN DATABASE BEFORE SAVING
-        user_exists = await db.users.find_one({"firebase_uid": uid})
-        if not user_exists:
-            logger.error(f"❌ User document not found for firebase_uid={uid}")
-            raise HTTPException(
-                status_code=400, 
-                detail=f"User document not found. Please ensure user is registered first."
-            )
-        logger.info(f"✅ User document found for firebase_uid={uid}")
+        logger.info(f"✅ User document found for identifier={uid}")
 
         # SAVE IMAGE URL IN MONGODB
         result = await db.users.update_one(
-            {"firebase_uid": uid},
+            user_query,
             {"$set": {"cover_image": public_url}}
         )
         logger.info(f"✅ Database updated - Modified count: {result.modified_count}")
@@ -240,7 +287,7 @@ async def upload_cover_image(
         logger.info(f"   Saved URL to MongoDB: {public_url}")
         
         # 8️⃣ VERIFY SAVE WAS SUCCESSFUL
-        updated_user = await db.users.find_one({"firebase_uid": uid})
+        updated_user = await db.users.find_one(user_query)
         if updated_user and updated_user.get("cover_image") == public_url:
             logger.info(f"✅ Verification successful: cover_image is saved correctly in database")
         else:
@@ -255,6 +302,8 @@ async def upload_cover_image(
         # 9️⃣ RETURN IMAGE URL TO FRONTEND
         return {"image_url": public_url}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Error uploading cover image: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
@@ -269,10 +318,7 @@ async def upload_govt_id(
     try:
         logger.info(f"🔹 Uploading government ID: {file.filename}")
         
-        # 1️⃣ GET FIREBASE TOKEN
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = get_user_uid(authorization)
         logger.info(f"✅ User authenticated: {uid}")
 
         # 2️⃣ FILE EXTENSION
@@ -291,13 +337,10 @@ async def upload_govt_id(
         logger.info(f"📤 File size: {len(file_content)} bytes")
 
         # 5️⃣ UPLOAD TO R2
-        s3.upload_fileobj(
-            BytesIO(file_content),
-            BUCKET_NAME,
+        await upload_fileobj_to_r2(
+            file_content,
             filename,
-            ExtraArgs={
-                "ContentType": file.content_type or "application/octet-stream"
-            }
+            file.content_type or "application/octet-stream"
         )
         logger.info(f"✅ File uploaded to R2 successfully")
 
@@ -322,9 +365,7 @@ async def upload_ad_logo(
     try:
         logger.info(f"🔹 Uploading ad logo: {file.filename}")
         
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = get_user_uid(authorization)
         
         if not file.filename or "." not in file.filename:
             raise ValueError("Invalid filename: no extension found")
@@ -333,11 +374,10 @@ async def upload_ad_logo(
         filename = f"publisher/ads/logo/{uid}-{int(time.time()*1000)}.{ext}"
         
         file_content = await file.read()
-        s3.upload_fileobj(
-            BytesIO(file_content),
-            BUCKET_NAME,
+        await upload_fileobj_to_r2(
+            file_content,
             filename,
-            ExtraArgs={"ContentType": file.content_type or "image/png"}
+            file.content_type or "image/png"
         )
         
         base_url = PUBLIC_BASE.rstrip("/")
@@ -360,9 +400,7 @@ async def upload_ad_photo(
     try:
         logger.info(f"🔹 Uploading ad photo: {file.filename}")
         
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = get_user_uid(authorization)
         
         if not file.filename or "." not in file.filename:
             raise ValueError("Invalid filename: no extension found")
@@ -371,11 +409,10 @@ async def upload_ad_photo(
         filename = f"publisher/ads/photo/{uid}-{int(time.time()*1000)}.{ext}"
         
         file_content = await file.read()
-        s3.upload_fileobj(
-            BytesIO(file_content),
-            BUCKET_NAME,
+        await upload_fileobj_to_r2(
+            file_content,
             filename,
-            ExtraArgs={"ContentType": file.content_type or "image/png"}
+            file.content_type or "image/png"
         )
         
         base_url = PUBLIC_BASE.rstrip("/")
@@ -398,9 +435,7 @@ async def upload_ad_video(
     try:
         logger.info(f"🔹 Uploading ad video: {file.filename}")
         
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = get_user_uid(authorization)
         
         if not file.filename or "." not in file.filename:
             raise ValueError("Invalid filename: no extension found")
@@ -409,11 +444,10 @@ async def upload_ad_video(
         filename = f"publisher/ads/video/{uid}-{int(time.time()*1000)}.{ext}"
         
         file_content = await file.read()
-        s3.upload_fileobj(
-            BytesIO(file_content),
-            BUCKET_NAME,
+        await upload_fileobj_to_r2(
+            file_content,
             filename,
-            ExtraArgs={"ContentType": file.content_type or "video/mp4"}
+            file.content_type or "video/mp4"
         )
         
         base_url = PUBLIC_BASE.rstrip("/")

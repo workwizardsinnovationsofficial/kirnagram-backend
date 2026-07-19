@@ -131,31 +131,31 @@ class UserActivityTrackingMiddleware(BaseHTTPMiddleware):
 
         return response
 
-# Add security headers middleware
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(UserActivityTrackingMiddleware)
-
 # ✅ CORS CONFIGURATION (VERY IMPORTANT)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://www.kirnagram.com",
+        "https://kirnagram.com",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
         "http://localhost:8080",
         "http://localhost:3000",
         "http://localhost:3006",
         "http://127.0.0.1:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3006",
-        "http://10.181.211.98:3000"
-        "",
-
-        
+        "http://10.181.211.98:3000",
     ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
-    allow_methods=["*"],   # allows OPTIONS, POST, GET, etc.
+    allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(UserActivityTrackingMiddleware)
 
 # Routes
 app.include_router(auth_router)

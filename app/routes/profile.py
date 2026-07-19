@@ -143,18 +143,7 @@ async def get_suggested_users(authorization: str = Header(...)):
 @router.get("/user/{user_id}")
 async def get_user_profile(user_id: str, authorization: str = Header(...)):
     try:
-        if not authorization or " " not in authorization:
-            logger.warning("Invalid authorization header in /profile/user/{user_id}")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        parts = authorization.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            logger.warning("Invalid authorization header format in /profile/user/{user_id} (not Bearer)")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        token = parts[1]
-        decoded = verify_firebase_token(token)
-        viewer_id = decoded["uid"]
+        viewer_id = _extract_uid(authorization)
 
         target = await db.users.find_one(
             {"firebase_uid": user_id},
@@ -203,14 +192,7 @@ async def get_user_profile(user_id: str, authorization: str = Header(...)):
 async def get_user_by_username(username: str, authorization: str = Header(...)):
     """Lookup user by username and return their firebase_uid"""
     try:
-        if not authorization or " " not in authorization:
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-        parts = authorization.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        token = parts[1]
-        decoded = verify_firebase_token(token)
+        _extract_uid(authorization)
 
         # Find user by username (case-insensitive)
         user = await db.users.find_one(
@@ -235,15 +217,7 @@ async def get_user_by_username(username: str, authorization: str = Header(...)):
 @router.get("/username-availability")
 async def username_availability(username: str, authorization: str = Header(...)):
     try:
-        if not authorization or " " not in authorization:
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-        parts = authorization.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        token = parts[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = _extract_uid(authorization)
 
         candidate = (username or "").strip()
         if not candidate:
@@ -337,17 +311,7 @@ async def update_profile(
     authorization: str = Header(...)
 ):
     try:
-        # Extract token from "Bearer {token}" format
-        if not authorization or " " not in authorization:
-            logger.warning("Invalid authorization header format in /profile/update")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-        parts = authorization.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            logger.warning("Invalid authorization header format in /profile/update (not Bearer)")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-        token = parts[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = _extract_uid(authorization)
 
         # Build update data. Allow explicit nulls (e.g., removing image/cover) while
         # ignoring fields that were not provided.
@@ -555,18 +519,7 @@ async def update_profile(
 async def get_about_account(user_id: str, authorization: str = Header(...)):
     """Get 'About this account' information including joined date and change counts"""
     try:
-        if not authorization or " " not in authorization:
-            logger.warning("Invalid authorization header in /profile/about/{user_id}")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        parts = authorization.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            logger.warning("Invalid authorization header format in /profile/about/{user_id} (not Bearer)")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        token = parts[1]
-        decoded = verify_firebase_token(token)
-        viewer_id = decoded["uid"]
+        viewer_id = _extract_uid(authorization)
 
         # Fetch target user by multiple identifiers for compatibility with old records.
         target_user = await db.users.find_one({
@@ -628,17 +581,7 @@ async def get_about_account(user_id: str, authorization: str = Header(...)):
 @router.get("/stats")
 async def get_profile_stats(authorization: str = Header(...)):
     try:
-        # Extract token from "Bearer {token}" format
-        if not authorization or " " not in authorization:
-            logger.warning("Invalid authorization header format in /profile/stats")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-        parts = authorization.split(" ")
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            logger.warning("Invalid authorization header format in /profile/stats (not Bearer)")
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-        token = parts[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = _extract_uid(authorization)
 
         posts = await db.posts.count_documents({"user_id": uid, "is_prompt_post": {"$ne": True}})
         prompts = await db.posts.count_documents({"user_id": uid, "is_prompt_post": True})
@@ -663,12 +606,8 @@ async def get_profile_stats(authorization: str = Header(...)):
 async def get_all_creators(authorization: str = Header(...)):
     """Get all approved AI creators with their total remix counts."""
     try:
-        if not authorization or " " not in authorization:
-            logger.warning("Invalid authorization header in /profile/creators/all")
-            raise HTTPException(status_code=401, detail="Invalid authorization header")
-        
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
+        uid = _extract_uid(authorization)
+        decoded = verify_firebase_token(extract_token_from_header(authorization))
         
         # Get all approved AI creator applications
         creator_apps = await db.ai_creator_applications.find(
@@ -727,12 +666,7 @@ async def get_all_creators(authorization: str = Header(...)):
 async def debug_make_public(authorization: str = Header(...)):
     """DEBUG: Change current user's account to PUBLIC"""
     try:
-        if not authorization or " " not in authorization:
-            logger.warning("Invalid authorization header in /profile/debug/make-public")
-            raise HTTPException(status_code=401, detail="Invalid authorization header")
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        uid = decoded["uid"]
+        uid = _extract_uid(authorization)
         result = await db.users.update_one(
             {"firebase_uid": uid},
             {"$set": {"account_type": "public"}}
@@ -770,14 +704,7 @@ async def debug_sync_follow_arrays(authorization: str = Header(...)):
     ⚠️ Should be used only for debugging or migration
     """
     try:
-        # 🔐 Verify token
-        if not authorization or " " not in authorization:
-            raise HTTPException(status_code=401, detail="Invalid authorization header")
-
-        token = authorization.split(" ")[1]
-        decoded = verify_firebase_token(token)
-        caller_uid = decoded["uid"]
-
+        caller_uid = _extract_uid(authorization)
         logger.info(f"🔧 Sync-follow-arrays triggered by user: {caller_uid}")
 
         # 📦 Get all users

@@ -422,10 +422,7 @@ async def login(request: LoginRequest):
 @router.post("/activity-ping")
 async def activity_ping(authorization: str = Header(...)):
     try:
-        if not authorization or " " not in authorization:
-            raise HTTPException(status_code=401, detail="Invalid authorization header format")
-
-        token = authorization.split(" ")[1]
+        token = extract_token_from_header(authorization)
         decoded = verify_firebase_token(token)
         uid = decoded.get("uid")
         if not uid:

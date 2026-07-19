@@ -2,6 +2,7 @@ from fastapi import APIRouter, Header, HTTPException
 from app.database import db
 from app.credits import grant_welcome_bonus_if_eligible
 from app.firebase import verify_firebase_token
+from app.jwt_auth import extract_token_from_header
 from app.models.user import UserCreate
 from app.models.google_user import GoogleUser
 from app.models.otp import SendEmailOtpRequest, VerifyEmailOtpRequest
@@ -142,7 +143,7 @@ async def signup(
 ):
     try:
         print("🔵 Signup endpoint called")
-        token = authorization.split(" ")[1]
+        token = extract_token_from_header(authorization)
         decoded = verify_firebase_token(token)
 
         uid = decoded["uid"]
@@ -199,7 +200,7 @@ async def google_login(
 ):
     try:
         print("🔵 Google login endpoint called")
-        token = authorization.split(" ")[1]
+        token = extract_token_from_header(authorization)
         decoded = verify_firebase_token(token)
 
         uid = decoded["uid"]
@@ -422,7 +423,7 @@ async def ensure_temporary_user(authorization: str = Header(...)):
 async def update_username(request: dict, authorization: str = Header(...)):
     """Update user username after profile completion."""
     try:
-        token = authorization.split(" ")[1]
+        token = extract_token_from_header(authorization)
         decoded = verify_firebase_token(token)
         uid = decoded["uid"]
 

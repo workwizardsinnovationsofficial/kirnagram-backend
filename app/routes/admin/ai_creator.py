@@ -499,7 +499,7 @@ async def revoke_creator_restriction(id: str):
 
 
 class AICreatorApplication(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None
     full_name: str
     email: str
     mobile: str
@@ -1070,26 +1070,51 @@ async def request_prompt_delete(prompt_id: str, reason: Optional[str] = None, au
 
 # --- USER ENDPOINTS ---
 @user_router.post("/apply")
-async def apply_ai_creator(application: AICreatorApplication):
+async def apply_ai_creator(application: AICreatorApplication, authorization: str = Header(...)):
+    user_id = get_user_id_from_header(authorization)
     await ensure_not_blocked_identifiers(application.email, application.mobile)
 
-    existing = await db.ai_creator_applications.find_one({"user_id": application.user_id})
+    user_doc = await db.users.find_one(
+        {"$or": [{"firebase_uid": user_id}, {"_id": ObjectId(user_id)}]},
+        {"creator_blocked": 1, "firebase_uid": 1}
+    )
+
+    existing_query = {"$or": [{"user_id": user_id}]}
+    if user_doc and user_doc.get("firebase_uid"):
+        existing_query["$or"].append({"firebase_uid": user_doc.get("firebase_uid")})
+
+    existing = await db.ai_creator_applications.find_one(existing_query)
+    normalized_insert = application.dict(exclude={"user_id"})
+    normalized_insert["user_id"] = user_id
+    if user_doc and user_doc.get("firebase_uid"):
+        normalized_insert["firebase_uid"] = user_doc.get("firebase_uid")
+
     if existing:
-        if str(existing.get("status") or "").lower() == "blocked":
+        existing_status = str(existing.get("status") or "").lower()
+        if existing_status == "blocked":
             raise HTTPException(status_code=403, detail="This account is permanently blocked for AI Creator.")
+        if existing_status == "rejected":
+            normalized_insert["status"] = "pending"
+            normalized_insert["reason"] = None
+            normalized_insert["updated_at"] = datetime.utcnow()
+            await db.ai_creator_applications.update_one(
+                {"_id": existing["_id"]},
+                {"$set": normalized_insert},
+            )
+            return {"message": "Application re-submitted."}
         raise HTTPException(status_code=400, detail="Application already exists.")
 
-    user_doc = await db.users.find_one({"firebase_uid": application.user_id}, {"creator_blocked": 1})
     if user_doc and bool(user_doc.get("creator_blocked")):
         raise HTTPException(status_code=403, detail="This account is permanently blocked for AI Creator.")
 
-    await db.ai_creator_applications.insert_one(application.dict())
+    await db.ai_creator_applications.insert_one(normalized_insert)
     return {"message": "Application submitted."}
 
 
 @user_router.get("/application/{user_id}")
 async def get_application(user_id: str):
-    app_data = await db.ai_creator_applications.find_one({"user_id": user_id})
+    query = {"$or": [{"user_id": user_id}, {"firebase_uid": user_id}]}
+    app_data = await db.ai_creator_applications.find_one(query)
     if not app_data:
         raise HTTPException(status_code=404, detail="Application not found.")
     app_data = await resolve_creator_application_status(app_data)
