@@ -1084,8 +1084,8 @@ async def google_login(request: GoogleAuthRequest):
     Login with Google OAuth
     
     For Google OAuth, we trust that Google has verified the email.
-    We reuse an existing saved mobile number when available and only require
-    verification for accounts that do not yet have a mobile attached.
+    For new users, mobile verification is required.
+    For existing users, we use their saved mobile number.
     """
 
     if not request.id_token:
@@ -1101,46 +1101,33 @@ async def google_login(request: GoogleAuthRequest):
         gender = request.gender or google_payload.get("gender")
         mobile = _normalize_mobile(request.mobile) if request.mobile else None
 
-        # For Google OAuth, we trust Google's email verification
-        # We don't need to check email_verifications collection
+        # Email is required for Google OAuth
         if not email:
             raise HTTPException(status_code=400, detail="Email from Google is required")
 
+        # Look up existing user by email
         user = await db.users.find_one({"email": email})
 
+        # For existing users, use their saved mobile
         if user and user.get("mobile"):
             mobile = _normalize_mobile(user.get("mobile"))
-
-        # Existing Google users keep their saved mobile number. We only ask for
-        # verification when no mobile is already attached to the account.
-        if not mobile:
-            return {
-                "success": False,
-                "needs_mobile_verification": True,
-                "email": email,
-                "full_name": full_name,
-                "image_name": image_name,
-                "dob": dob,
-                "gender": gender,
-                "message": "Mobile verification required"
-            }
-
-        # New users still need the submitted mobile to be verified before we
-        # create the account.
+        
+        # For new users, mobile is required and must be verified
         if not user:
+            if not mobile:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Mobile number is required for new Google accounts. Please provide and verify your mobile number."
+                )
+            
             mobile_verification = await db.mobile_verifications.find_one({"_id": mobile})
             if not mobile_verification or not mobile_verification.get("verified"):
-                return {
-                    "success": False,
-                    "needs_mobile_verification": True,
-                    "email": email,
-                    "full_name": full_name,
-                    "image_name": image_name,
-                    "dob": dob,
-                    "gender": gender,
-                    "message": "Mobile verification required"
-                }
+                raise HTTPException(
+                    status_code=400,
+                    detail="Mobile number not verified. Please verify your mobile number first."
+                )
 
+        # Create new user if they don't exist
         if not user:
             public_id = await next_public_user_id()
 
@@ -1152,6 +1139,8 @@ async def google_login(request: GoogleAuthRequest):
                 "mobile": mobile,
                 "auth_type": "google",
                 "password_hash": None,
+                "account_type": "public",
+                "two_factor_enabled": False,
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow(),
                 "is_active": True,
@@ -1163,7 +1152,6 @@ async def google_login(request: GoogleAuthRequest):
             }
 
             result = await db.users.insert_one(user_doc)
-
             firebase_uid = str(result.inserted_id)
 
             await db.users.update_one(
@@ -1171,25 +1159,27 @@ async def google_login(request: GoogleAuthRequest):
                 {"$set": {"firebase_uid": firebase_uid}}
             )
 
-            user = user_doc
-            user["_id"] = result.inserted_id
-            user["firebase_uid"] = firebase_uid
+            # Grant welcome bonus for new users
+            await grant_welcome_bonus_if_eligible(firebase_uid, user_doc.get("created_at"))
 
+            # Cleanup OTP records
+            if mobile:
+                await db.mobile_verifications.delete_one({"_id": mobile})
+
+            user = {**user_doc, "_id": result.inserted_id, "firebase_uid": firebase_uid}
             is_new_user = True
 
         else:
             is_new_user = False
+            firebase_uid = user.get("firebase_uid") or str(user["_id"])
 
             if not user.get("firebase_uid"):
-                firebase_uid = str(user["_id"])
-
                 await db.users.update_one(
                     {"_id": user["_id"]},
                     {"$set": {"firebase_uid": firebase_uid}}
                 )
 
-                user["firebase_uid"] = firebase_uid
-
+        # Update last login and profile info
         await db.users.update_one(
             {"_id": user["_id"]},
             {
@@ -1204,7 +1194,7 @@ async def google_login(request: GoogleAuthRequest):
         )
 
         tokens = create_session_tokens(
-            str(user["_id"]),
+            firebase_uid,
             email=user.get("email"),
             mobile=user.get("mobile"),
         )
