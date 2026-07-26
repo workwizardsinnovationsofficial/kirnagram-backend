@@ -1,3 +1,4 @@
+import socket
 import aiohttp
 from typing import Dict
 import smtplib
@@ -301,39 +302,91 @@ class EmailService:
     @staticmethod
     async def _send_email(to_email: str, subject: str, html_content: str) -> Dict:
         """Internal method to send email"""
-        
+
+        import time
+
         try:
-            # Create message
+            print("STEP 1 - Creating message")
+
             message = MIMEMultipart("alternative")
             message["Subject"] = subject
             message["From"] = SENDER_EMAIL
             message["To"] = to_email
-            
-            # Attach HTML content
+
             part = MIMEText(html_content, "html")
             message.attach(part)
-            
-            # Send email (using sync for now, can be made async if needed)
+
+            print("STEP 2 - Message ready")
+
             if SMTP_PORT == 465:
-                with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as server:
+                print("STEP 3 - Connecting SMTP_SSL")
+                t = time.time()
+
+                with smtplib.SMTP_SSL(
+                    SMTP_SERVER,
+                    SMTP_PORT,
+                    timeout=15
+                ) as server:
+
+                    print("STEP 4 - Connected", time.time() - t)
+
+                    t = time.time()
                     server.login(SENDER_EMAIL, SENDER_PASSWORD)
-                    server.sendmail(SENDER_EMAIL, to_email, message.as_string())
+                    print("STEP 5 - Logged in", time.time() - t)
+
+                    t = time.time()
+                    server.sendmail(
+                        SENDER_EMAIL,
+                        to_email,
+                        message.as_string()
+                    )
+                    print("STEP 6 - Mail sent", time.time() - t)
+
             else:
-                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                print("STEP 3 - Connecting SMTP")
+                t = time.time()
+                socket.has_ipv6 = False
+
+                with smtplib.SMTP(
+                    SMTP_SERVER,
+                    SMTP_PORT,
+                    timeout=15
+                ) as server:
+
+                    print("STEP 4 - Connected", time.time() - t)
+
+                    t = time.time()
                     server.ehlo()
                     server.starttls()
                     server.ehlo()
+                    print("STEP 5 - TLS Done", time.time() - t)
+
+                    t = time.time()
                     server.login(SENDER_EMAIL, SENDER_PASSWORD)
-                    server.sendmail(SENDER_EMAIL, to_email, message.as_string())
-            
+                    print("STEP 6 - Logged in", time.time() - t)
+
+                    t = time.time()
+                    server.sendmail(
+                        SENDER_EMAIL,
+                        to_email,
+                        message.as_string()
+                    )
+                    print("STEP 7 - Mail sent", time.time() - t)
+
+            print("STEP 8 - Success")
+
             return {
                 "success": True,
                 "message": "Email sent successfully"
             }
-        
+
         except Exception as e:
-            print(f"Email error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+            print("EMAIL ERROR:", e)
+
             return {
                 "success": False,
-                "message": f"Failed to send email: {str(e)}"
+                "message": str(e)
             }

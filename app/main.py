@@ -33,6 +33,7 @@ load_dotenv()
 app = FastAPI(title="kirnagram Backend")
 
 
+
 async def password_setup_notification_loop():
     while True:
         try:
@@ -139,6 +140,7 @@ app.add_middleware(
         "https://kirnagram.com",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://kirnagram-dashboard.vercel.app",
         "http://localhost:8080",
         "http://localhost:3000",
         "http://localhost:3006",

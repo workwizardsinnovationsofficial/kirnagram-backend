@@ -77,16 +77,25 @@ def _send_email_otp(to_email: str, otp: str) -> None:
 
 
 async def send_email_otp(email: str, channel: str = "email-signup") -> dict:
+    print("STEP 1 - Function started", flush=True)
+
     normalized_email = normalize_email(email)
     now = datetime.utcnow()
+
+    print("STEP 2 - Email normalized", flush=True)
 
     latest = await otp_collection.find_one(
         {"email": normalized_email, "channel": channel},
         sort=[("created_at", -1)],
     )
 
+    print("STEP 3 - Checked previous OTP", flush=True)
+
     if latest and latest.get("created_at"):
-        retry_at = latest["created_at"] + timedelta(seconds=EMAIL_OTP_RESEND_COOLDOWN_SECONDS)
+        retry_at = latest["created_at"] + timedelta(
+            seconds=EMAIL_OTP_RESEND_COOLDOWN_SECONDS
+        )
+
         if now < retry_at:
             seconds_left = int((retry_at - now).total_seconds())
             raise HTTPException(
@@ -94,15 +103,33 @@ async def send_email_otp(email: str, channel: str = "email-signup") -> dict:
                 detail=f"Please wait {seconds_left} seconds before requesting another OTP",
             )
 
+    print("STEP 4 - Passed cooldown check", flush=True)
+
     otp = _generate_otp()
     expires_at = now + timedelta(minutes=EMAIL_OTP_EXPIRY_MINUTES)
 
+    print("STEP 5 - OTP generated", flush=True)
+
     _send_email_otp(normalized_email, otp)
 
+    print("STEP 6 - Email sent", flush=True)
+
     await otp_collection.update_many(
-        {"email": normalized_email, "channel": "email-signup", "used": False},
-        {"$set": {"used": True, "invalidated_at": now, "updated_at": now}},
+        {
+            "email": normalized_email,
+            "channel": "email-signup",
+            "used": False,
+        },
+        {
+            "$set": {
+                "used": True,
+                "invalidated_at": now,
+                "updated_at": now,
+            }
+        },
     )
+
+    print("STEP 7 - Old OTPs invalidated", flush=True)
 
     await otp_collection.insert_one(
         {
@@ -118,6 +145,10 @@ async def send_email_otp(email: str, channel: str = "email-signup") -> dict:
             "updated_at": now,
         }
     )
+
+    print("STEP 8 - New OTP saved to MongoDB", flush=True)
+
+    print("STEP 9 - Returning success", flush=True)
 
     return {
         "success": True,
