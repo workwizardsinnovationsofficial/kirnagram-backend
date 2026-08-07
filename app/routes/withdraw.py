@@ -52,23 +52,24 @@ async def get_withdraw_settings() -> Dict[str, Any]:
 async def _compute_creator_earnings(user_id: str) -> Dict[str, int]:
     prompts = await db.ai_creator_prompts.find({"user_id": user_id}).to_list(None)
     total_prompts = len(prompts)
+    prompt_ids = [str(prompt.get("_id")) for prompt in prompts if prompt.get("_id")]
 
-    # Earnings belong to prompt owner, so compute from remix IDs attached to creator prompts.
-    remix_object_ids = []
-    for prompt in prompts:
-        for remix_id in prompt.get("remixes", []):
-            if isinstance(remix_id, ObjectId):
-                remix_object_ids.append(remix_id)
-            elif isinstance(remix_id, str) and ObjectId.is_valid(remix_id):
-                remix_object_ids.append(ObjectId(remix_id))
+    total_remixes = 0
+    total_earned = 0
+    if prompt_ids:
+        remix_docs = await db.ai_creator_remixes.find(
+            {"prompt_id": {"$in": prompt_ids}},
+            {"payout_per_remix": 1}
+        ).to_list(None)
+        total_remixes = len(remix_docs)
+        total_earned = sum(int(remix.get("payout_per_remix", 1) or 1) for remix in remix_docs)
 
-    total_remixes = len(remix_object_ids)
-    all_remixes = []
-    if remix_object_ids:
-        all_remixes = await db.ai_creator_remixes.find({"_id": {"$in": remix_object_ids}}).to_list(None)
-
-    # Each remix stores payout_per_remix at creation time (historical lock).
-    total_earned = sum(int(remix.get("payout_per_remix", 1) or 1) for remix in all_remixes)
+    money_bonus_rows = await db.ai_creator_money_bonuses.aggregate([
+        {"$match": {"user_id": user_id, "status": {"$in": ["granted", "approved", "completed"]}}},
+        {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    total_money_bonus = int(money_bonus_rows[0].get("sum", 0)) if money_bonus_rows else 0
+    total_earned += total_money_bonus
 
     withdrawn_rows = await db.withdraw_requests.aggregate([
         {"$match": {"user_id": user_id, "status": {"$in": ["approved", "paid"]}}},

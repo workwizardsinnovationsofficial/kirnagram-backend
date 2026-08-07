@@ -629,17 +629,22 @@ async def get_all_creators(authorization: str = Header(...)):
             # aligned with the earnings logic used across the app.
             creator_prompts = await db.ai_creator_prompts.find(
                 {"user_id": creator_uid},
-                {"_id": 0, "remix_count": 1, "remixes": 1},
+                {"_id": 1},
             ).to_list(length=None)
 
+            prompt_ids = [str(prompt.get("_id")) for prompt in creator_prompts if prompt.get("_id")]
+            prompt_id_matchers = []
+            for prompt_id in prompt_ids:
+                prompt_id_matchers.append(prompt_id)
+                if ObjectId.is_valid(prompt_id):
+                    prompt_id_matchers.append(ObjectId(prompt_id))
+
             total_remixes = 0
-            for prompt in creator_prompts:
-                remix_count = int(prompt.get("remix_count") or 0)
-                if remix_count <= 0:
-                    remixes_arr = prompt.get("remixes", [])
-                    remix_count = len(remixes_arr) if isinstance(remixes_arr, list) else 0
-                total_remixes += remix_count
-            
+            if prompt_id_matchers:
+                total_remixes = await db.ai_creator_remixes.count_documents({
+                    "prompt_id": {"$in": prompt_id_matchers}
+                })
+
             result.append({
                 "firebase_uid": creator_uid,
                 "username": creator.get("username"),
