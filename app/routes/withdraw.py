@@ -81,6 +81,7 @@ async def _compute_creator_earnings(user_id: str) -> Dict[str, int]:
         "totalPrompts": total_prompts,
         "totalRemixes": total_remixes,
         "totalEarnings": total_earned,
+        "totalMoneyBonus": total_money_bonus,
         "totalWithdrawn": int(total_withdrawn or 0),
         "availableBalance": max(0, int(total_earned or 0) - int(total_withdrawn or 0)),
     }
