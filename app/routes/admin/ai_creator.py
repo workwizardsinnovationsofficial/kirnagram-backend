@@ -5,7 +5,7 @@ import json
 from app.database import db
 from app.credits import ensure_wallet, record_transaction
 from app.config import APP_ENV
-from app.firebase import verify_firebase_token
+from app.firebase import verify_admin_firebase_token
 from app.r2 import s3, BUCKET_NAME, PUBLIC_BASE
 from bson import ObjectId
 from datetime import datetime, timedelta
@@ -64,17 +64,28 @@ async def ensure_not_blocked_identifiers(email: Optional[str], mobile: Optional[
 
 def get_user_id_from_header(authorization: str) -> str:
     if not authorization or " " not in authorization:
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization header format"
+        )
 
     scheme, token = authorization.split(" ", 1)
+
     if scheme.lower() != "bearer" or not token:
-        raise HTTPException(status_code=401, detail="Invalid authorization header format")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authorization header format"
+        )
 
     try:
-        decoded = verify_firebase_token(token)
+        decoded = verify_admin_firebase_token(token)
         return decoded["uid"]
+
     except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(exc)}")
+        raise HTTPException(
+            status_code=401,
+            detail=f"Token verification failed: {str(exc)}"
+        )
 
 
 async def get_admin_actor(
