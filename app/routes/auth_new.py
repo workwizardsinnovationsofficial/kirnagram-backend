@@ -848,22 +848,24 @@ async def _verify_google_id_token(id_token: str):
             response = await client.get(
                 "https://oauth2.googleapis.com/tokeninfo",
                 params={"id_token": id_token},
-                timeout=10.0
+                timeout=10.0,
             )
+            response.raise_for_status()
+            payload = response.json()
 
-        response.raise_for_status()
-        payload = response.json()
+            email_verified = payload.get("email_verified")
+            if email_verified not in {"true", True, "1", 1}:
+                raise HTTPException(status_code=401, detail="Google email not verified")
 
-        email_verified = payload.get("email_verified")
-        if email_verified not in {"true", True, "1", 1}:
-            raise HTTPException(status_code=401, detail="Google email not verified")
+            return payload
 
-        return payload
+    except HTTPException:
+        raise
 
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=401,
-            detail=f"Invalid Google ID token: {exc.response.text}"
+            detail="Invalid Google ID token"
         ) from exc
 
     except Exception as exc:
@@ -871,6 +873,7 @@ async def _verify_google_id_token(id_token: str):
             status_code=401,
             detail=f"Failed to verify Google token: {str(exc)}"
         ) from exc
+
 
 @router.post("/forgot-password")
 async def forgot_password(request: ForgotPasswordRequest):
@@ -1207,10 +1210,11 @@ async def google_login(request: GoogleAuthRequest):
     except HTTPException:
         raise
 
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Google login failed: {str(e)}"
+        )
 
 
 # --------------------------------------------------

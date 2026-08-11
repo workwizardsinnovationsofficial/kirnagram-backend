@@ -46,7 +46,7 @@ async def test_profile_endpoint():
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                'https://api.kirnagram.com/profile/me',
+                'http://localhost:8000/profile/me',
                 headers={'Authorization': f'Bearer {token}'},
                 timeout=10.0
             )

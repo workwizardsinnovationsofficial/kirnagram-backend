@@ -3,11 +3,20 @@ from pydantic import BaseModel
 from typing import Optional, List
 import json
 from app.database import db
+from app.credits import ensure_wallet, record_transaction
+from app.config import APP_ENV
 from app.firebase import verify_firebase_token
 from app.r2 import s3, BUCKET_NAME, PUBLIC_BASE
 from bson import ObjectId
 from datetime import datetime, timedelta
 from pymongo import ReturnDocument
+
+class BonusAllocation(BaseModel):
+    user_id: str
+    amount: Optional[int] = None
+    credits: Optional[int] = None
+    money: Optional[int] = None
+    reason: Optional[str] = None
 
 DEFAULT_PAYOUT_PER_REMIX = 1
 DEFAULT_BURN_CREDITS_PER_REMIX = 3
@@ -66,6 +75,23 @@ def get_user_id_from_header(authorization: str) -> str:
         return decoded["uid"]
     except Exception as exc:
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(exc)}")
+
+
+async def get_admin_actor(
+    authorization: Optional[str],
+    x_local_admin: Optional[str] = None,
+) -> dict:
+    if authorization:
+        uid = get_user_id_from_header(authorization)
+        actor = await db.users.find_one({"firebase_uid": uid})
+        if not actor or actor.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return actor
+
+    if APP_ENV == "dev" and isinstance(x_local_admin, str) and x_local_admin.strip().lower() == "true":
+        return {"firebase_uid": "local-admin", "role": "admin"}
+
+    raise HTTPException(status_code=401, detail="Admin authorization required")
 
 
 async def require_creator(user_id: str) -> None:
@@ -496,6 +522,99 @@ async def revoke_creator_restriction(id: str):
     })
 
     return {"success": True, "id": id, "status": "approved"}
+
+
+@admin_router.post("/bonus")
+async def allocate_creator_bonus(
+    payload: BonusAllocation,
+    authorization: Optional[str] = Header(default=None),
+    x_local_admin: Optional[str] = Header(default=None, alias="X-Local-Admin"),
+):
+    credits = int(payload.credits or payload.amount or 0)
+    money = int(payload.money or 0)
+
+    if credits < 0 or money < 0:
+        raise HTTPException(status_code=400, detail="Bonus amounts must be non-negative")
+    if credits <= 0 and money <= 0:
+        raise HTTPException(status_code=400, detail="At least one of credits or money must be greater than 0")
+
+    actor = await get_admin_actor(authorization, x_local_admin)
+    if not actor or actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    target_user = await db.users.find_one({"firebase_uid": payload.user_id})
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Target user not found")
+
+    target_creator = await db.ai_creator_applications.find_one({"user_id": payload.user_id, "status": "approved"})
+    if not target_creator:
+        raise HTTPException(status_code=400, detail="Target user is not an approved AI Creator")
+
+    updated_balance = 0
+    now = datetime.utcnow()
+    if credits > 0:
+        await ensure_wallet(payload.user_id)
+        await db.credit_wallets.update_one(
+            {"user_id": payload.user_id},
+            {
+                "$inc": {"balance": credits},
+                "$set": {"updated_at": now},
+            },
+            upsert=True,
+        )
+
+        await record_transaction(
+            payload.user_id,
+            credits,
+            "admin_creator_credit_bonus",
+            {"reason": payload.reason or "admin_allocated_bonus"},
+        )
+
+        updated_wallet = await db.credit_wallets.find_one({"user_id": payload.user_id})
+        updated_balance = int(updated_wallet.get("balance", 0)) if updated_wallet else credits
+
+    if money > 0:
+        await db.ai_creator_money_bonuses.insert_one({
+            "user_id": payload.user_id,
+            "amount": money,
+            "status": "granted",
+            "reason": payload.reason or "admin_allocated_bonus",
+            "created_at": now,
+            "updated_at": now,
+        })
+
+    message_parts = []
+    description_parts = []
+    if credits > 0:
+        message_parts.append(f"{credits} bonus credits")
+        description_parts.append(f"{credits} bonus credits")
+    if money > 0:
+        message_parts.append(f"₹{money} bonus money")
+        description_parts.append(f"₹{money} bonus money")
+
+    await db.notifications.insert_one({
+        "user_id": payload.user_id,
+        "user_name": "Kirnagram",
+        "action": "admin_creator_bonus",
+        "type": "admin_creator_bonus",
+        "status": "granted",
+        "message": f"You received {' and '.join(message_parts)} from admin.",
+        "description": f"Admin allocated {' and '.join(description_parts)} to your account.",
+        "meta": {
+            "reason": payload.reason or "admin_allocated_bonus",
+            "credits": credits,
+            "money": money,
+        },
+        "timestamp": now,
+    })
+
+    return {
+        "success": True,
+        "user_id": payload.user_id,
+        "credits": credits,
+        "money": money,
+        "balance": updated_balance,
+    }
 
 
 class AICreatorApplication(BaseModel):

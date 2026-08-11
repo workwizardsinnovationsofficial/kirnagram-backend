@@ -376,19 +376,27 @@ async def get_feed(
     # ✅ Attach user profiles to each post
     user_ids = list(set([post["user_id"] for post in posts if "user_id" in post]))
     user_profiles = {}
+    creator_lookup = {}
     if user_ids:
         user_profiles = {u["firebase_uid"]: u for u in await db.users.find({"firebase_uid": {"$in": user_ids}}).to_list(len(user_ids))}
+        creator_docs = await db.ai_creator_applications.find(
+            {"user_id": {"$in": user_ids}, "status": "approved"},
+            {"_id": 0, "user_id": 1},
+        ).to_list(None)
+        creator_lookup = {str(doc.get("user_id")): True for doc in creator_docs if doc.get("user_id")}
 
     def build_user_profile(u):
         if not u:
             return None
+        uid = u.get("firebase_uid")
         return {
-            "firebase_uid": u.get("firebase_uid"),
+            "firebase_uid": uid,
             "username": u.get("username"),
             "full_name": u.get("full_name"),
+            "public_id": u.get("public_id"),
             "image_name": u.get("image_name"),
             "gender": u.get("gender"),
-            "isVerified": u.get("isVerified", False)
+            "is_creator": bool(creator_lookup.get(str(uid))),
         }
 
     # ✅ Build response with pagination metadata
@@ -459,17 +467,26 @@ async def get_explore_posts(
         u["firebase_uid"]: u
         for u in await db.users.find({"firebase_uid": {"$in": user_ids}}).to_list(len(user_ids))
     }
+    creator_lookup = {}
+    if user_ids:
+        creator_docs = await db.ai_creator_applications.find(
+            {"user_id": {"$in": user_ids}, "status": "approved"},
+            {"_id": 0, "user_id": 1},
+        ).to_list(None)
+        creator_lookup = {str(doc.get("user_id")): True for doc in creator_docs if doc.get("user_id")}
 
     def build_user_profile(u):
         if not u:
             return None
+        uid = u.get("firebase_uid")
         return {
-            "firebase_uid": u.get("firebase_uid"),
+            "firebase_uid": uid,
             "username": u.get("username"),
             "full_name": u.get("full_name"),
+            "public_id": u.get("public_id"),
             "image_name": u.get("image_name"),
             "gender": u.get("gender"),
-            "isVerified": u.get("isVerified", False),
+            "is_creator": bool(creator_lookup.get(str(uid))),
         }
 
     result = []
@@ -801,6 +818,14 @@ async def get_post_likes(
         {"firebase_uid": {"$in": likes}},
         {"_id": 0, "firebase_uid": 1, "username": 1, "public_id": 1, "full_name": 1, "image_name": 1, "gender": 1}
     ).to_list(None)
+
+    creator_uids = await db.ai_creator_applications.find(
+        {"user_id": {"$in": likes}, "status": "approved"},
+        {"_id": 0, "user_id": 1},
+    ).to_list(None)
+    creator_lookup = {str(doc.get("user_id")) for doc in creator_uids if doc.get("user_id")}
+    for user in users:
+        user["is_creator"] = str(user.get("firebase_uid")) in creator_lookup
 
     return {
         "total": len(likes),

@@ -136,6 +136,22 @@ async def get_payment_history(authorization: str = Header(...)):
                 "description": f"Ad: {payment.get('ad_name', '')} - {payment.get('duration_days', 0)} days"
             })
 
+        # Add admin money bonuses
+        money_bonuses = await db.ai_creator_money_bonuses.find(
+            {"user_id": user_id, "status": {"$in": ["granted", "approved", "completed"]}}
+        ).sort("created_at", -1).to_list(length=100)
+        for bonus in money_bonuses:
+            transactions.append({
+                "id": str(bonus.get("_id", "")),
+                "type": "Admin Money Bonus",
+                "category": "money",
+                "amount": _to_int(bonus.get("amount", 0), 0),
+                "timestamp": _iso(bonus.get("created_at")),
+                "status": bonus.get("status", "granted"),
+                "icon": "Gift",
+                "description": bonus.get("reason", "Admin allocated money bonus"),
+            })
+
         # Add withdrawals
         for withdrawal in withdrawals:
             status_icon = {

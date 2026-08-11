@@ -2,7 +2,6 @@ import asyncio
 from fastapi import APIRouter, UploadFile, File, Header, HTTPException
 from app.r2 import s3, BUCKET_NAME, PUBLIC_BASE
 from app.jwt_auth import extract_token_from_header
-from app.jwt_auth import verify_access_token
 from app.firebase import verify_firebase_token
 from app.database import db
 from bson import ObjectId
@@ -24,19 +23,6 @@ def get_token_from_header(authorization: str | None) -> str:
 
 def get_user_uid(authorization: str | None) -> str:
     token = get_token_from_header(authorization)
-
-    # Primary path: JWT access token used by current auth flow.
-    try:
-        payload = verify_access_token(token)
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token payload")
-        return user_id
-    except HTTPException as jwt_error:
-        # Fallback path: Firebase token for legacy clients.
-        if jwt_error.status_code != 401:
-            raise
-
     decoded = verify_firebase_token(token)
     uid = decoded.get("uid")
     if not uid:
@@ -119,20 +105,7 @@ async def upload_profile_image(
     try:
         logger.info(f"🔹 Uploading profile image: {file.filename}")
         uid = get_user_uid(authorization)
-        user_query = {"$or": [{"firebase_uid": uid}]}
-        if ObjectId.is_valid(uid):
-            user_query["$or"].append({"_id": ObjectId(uid)})
-
-        user_exists = await db.users.find_one(user_query)
-        if not user_exists:
-            logger.error(f"❌ User document not found for identifier={uid}")
-            raise HTTPException(
-                status_code=400,
-                detail="User document not found. Please ensure user is registered first."
-            )
-
-        storage_uid = user_exists.get("firebase_uid") or uid
-        logger.info(f"✅ User authenticated: {storage_uid}")
+        logger.info(f"✅ User authenticated: {uid}")
 
         # 3️⃣ FILE EXTENSION (jpg / png / webp)
         if not file.filename or "." not in file.filename:
@@ -142,7 +115,7 @@ async def upload_profile_image(
         logger.info(f"📄 File extension: {ext}")
 
         # 4️⃣ UNIQUE FILE PATH IN R2
-        filename = f"profile/{storage_uid}.{ext}"
+        filename = f"profile/{uid}.{ext}"
         logger.info(f"📁 R2 path: {filename}")
         logger.info(f"🪣 Bucket: {BUCKET_NAME}")
         logger.info(f"🌐 Public base: {PUBLIC_BASE}")
@@ -173,11 +146,19 @@ async def upload_profile_image(
         logger.info(f"   Bucket: {BUCKET_NAME}")
         logger.info(f"   Filename: {filename}")
 
-        logger.info(f"✅ User document found for identifier={uid}")
+        # 7️⃣ VERIFY USER EXISTS IN DATABASE BEFORE SAVING
+        user_exists = await db.users.find_one({"firebase_uid": uid})
+        if not user_exists:
+            logger.error(f"❌ User document not found for firebase_uid={uid}")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"User document not found. Please ensure user is registered first."
+            )
+        logger.info(f"✅ User document found for firebase_uid={uid}")
 
         # SAVE IMAGE URL IN MONGODB
         result = await db.users.update_one(
-            user_query,
+            {"firebase_uid": uid},
             {"$set": {"image_name": public_url}}
         )
         logger.info(f"✅ Database updated - Modified count: {result.modified_count}")
@@ -186,7 +167,7 @@ async def upload_profile_image(
         logger.info(f"   Saved URL to MongoDB: {public_url}")
         
         # 7️⃣ VERIFY SAVE WAS SUCCESSFUL
-        updated_user = await db.users.find_one(user_query)
+        updated_user = await db.users.find_one({"firebase_uid": uid})
         if updated_user and updated_user.get("image_name") == public_url:
             logger.info(f"✅ Verification successful: image_name is saved correctly in database")
         else:
@@ -201,8 +182,6 @@ async def upload_profile_image(
         # 8️⃣ RETURN IMAGE URL TO FRONTEND
         return {"image_url": public_url}
 
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error(f"❌ Error uploading profile image: {str(e)}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
@@ -222,20 +201,7 @@ async def upload_cover_image(
         logger.info(f"🔹 Uploading cover image: {file.filename}")
         
         uid = get_user_uid(authorization)
-        user_query = {"$or": [{"firebase_uid": uid}]}
-        if ObjectId.is_valid(uid):
-            user_query["$or"].append({"_id": ObjectId(uid)})
-
-        user_exists = await db.users.find_one(user_query)
-        if not user_exists:
-            logger.error(f"❌ User document not found for identifier={uid}")
-            raise HTTPException(
-                status_code=400,
-                detail="User document not found. Please ensure user is registered first."
-            )
-
-        storage_uid = user_exists.get("firebase_uid") or uid
-        logger.info(f"✅ User authenticated: {storage_uid}")
+        logger.info(f"✅ User authenticated: {uid}")
 
         # 3️⃣ FILE EXTENSION (jpg / png / webp)
         if not file.filename or "." not in file.filename:
@@ -245,7 +211,7 @@ async def upload_cover_image(
         logger.info(f"📄 File extension: {ext}")
 
         # 4️⃣ UNIQUE FILE PATH IN R2
-        filename = f"cover/{storage_uid}.{ext}"
+        filename = f"cover/{uid}.{ext}"
         logger.info(f"📁 R2 path: {filename}")
 
         # 5️⃣ UPLOAD FILE TO CLOUDFLARE R2
@@ -274,11 +240,19 @@ async def upload_cover_image(
         logger.info(f"   Bucket: {BUCKET_NAME}")
         logger.info(f"   Filename: {filename}")
 
-        logger.info(f"✅ User document found for identifier={uid}")
+        # 7️⃣ VERIFY USER EXISTS IN DATABASE BEFORE SAVING
+        user_exists = await db.users.find_one({"firebase_uid": uid})
+        if not user_exists:
+            logger.error(f"❌ User document not found for firebase_uid={uid}")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"User document not found. Please ensure user is registered first."
+            )
+        logger.info(f"✅ User document found for firebase_uid={uid}")
 
         # SAVE IMAGE URL IN MONGODB
         result = await db.users.update_one(
-            user_query,
+            {"firebase_uid": uid},
             {"$set": {"cover_image": public_url}}
         )
         logger.info(f"✅ Database updated - Modified count: {result.modified_count}")
@@ -287,7 +261,7 @@ async def upload_cover_image(
         logger.info(f"   Saved URL to MongoDB: {public_url}")
         
         # 8️⃣ VERIFY SAVE WAS SUCCESSFUL
-        updated_user = await db.users.find_one(user_query)
+        updated_user = await db.users.find_one({"firebase_uid": uid})
         if updated_user and updated_user.get("cover_image") == public_url:
             logger.info(f"✅ Verification successful: cover_image is saved correctly in database")
         else:

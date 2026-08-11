@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.database import db
 from app.firebase import verify_firebase_token
+from bson import ObjectId
 from firebase_admin import auth
 
 router = APIRouter(prefix="/admin/dashboard", tags=["Admin Dashboard"])
@@ -432,12 +433,33 @@ async def get_users_dashboard(
         creator_app = await db.ai_creator_applications.find_one({"user_id": uid, "status": "approved"})
         is_creator = bool(creator_app)
 
-        prompts_created_count = await db.ai_creator_prompts.count_documents({"user_id": uid})
         posts_count = await db.posts.count_documents(
             {"user_id": uid, "is_prompt_post": {"$ne": True}}
         )
-        remixes_count = await db.ai_creator_remixes.count_documents({"user_id": uid})
         withdraw_count = await db.withdraw_requests.count_documents({"user_id": uid})
+
+        prompts = await db.ai_creator_prompts.find(
+            {"user_id": uid},
+            {"_id": 1, "payout_per_remix": 1}
+        ).to_list(length=None)
+        prompts_created_count = len(prompts)
+        prompt_ids = [str(prompt.get("_id")) for prompt in prompts if prompt.get("_id")]
+        prompt_id_matchers = []
+        for prompt_id in prompt_ids:
+            prompt_id_matchers.append(prompt_id)
+            if ObjectId.is_valid(prompt_id):
+                prompt_id_matchers.append(ObjectId(prompt_id))
+
+        remixes_count = 0
+        remixes_docs = []
+        if is_creator and prompt_id_matchers:
+            remixes_docs = await db.ai_creator_remixes.find(
+                {"prompt_id": {"$in": prompt_id_matchers}},
+                {"payout_per_remix": 1}
+            ).to_list(None)
+            remixes_count = len(remixes_docs)
+        elif not is_creator:
+            remixes_count = await db.ai_creator_remixes.count_documents({"user_id": uid})
 
         followers = user.get("followers")
         following = user.get("following")
@@ -454,19 +476,17 @@ async def get_users_dashboard(
 
         creator_remaining_money = 0
         if is_creator:
-            prompts = await db.ai_creator_prompts.find(
-                {"user_id": uid},
-                {"_id": 0, "payout_per_remix": 1, "remix_count": 1, "remixes": 1},
-            ).to_list(length=None)
+            total_earned = sum(
+                _safe_int(remix.get("payout_per_remix", 1) or 1)
+                for remix in remixes_docs
+            )
 
-            total_earned = 0
-            for prompt in prompts:
-                payout = _safe_int(prompt.get("payout_per_remix") or 1)
-                remix_count = _safe_int(prompt.get("remix_count"))
-                if remix_count <= 0:
-                    remixes_arr = prompt.get("remixes", [])
-                    remix_count = len(remixes_arr) if isinstance(remixes_arr, list) else 0
-                total_earned += payout * remix_count
+            bonus_rows = await db.ai_creator_money_bonuses.aggregate([
+                {"$match": {"user_id": uid, "status": {"$in": ["granted", "approved", "completed"]}}},
+                {"$group": {"_id": None, "sum": {"$sum": "$amount"}}},
+            ]).to_list(length=1)
+            total_money_bonus = _safe_int(bonus_rows[0].get("sum")) if bonus_rows else 0
+            total_earned += total_money_bonus
 
             withdrawn_rows = await db.withdraw_requests.aggregate(
                 [
